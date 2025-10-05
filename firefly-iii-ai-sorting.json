@@ -1,0 +1,298 @@
+[
+    {
+        "id": "webhook_flow_v2",
+        "type": "tab",
+        "label": "AI Firefly III Categorizer (Webhook + LLM)",
+        "disabled": false,
+        "info": "Triggered by Firefly III webhooks. Adds category/budget using a small OpenAI-compatible model (e.g. Phi-3 Mini)."
+    },
+    {
+        "id": "parse_webhook",
+        "type": "function",
+        "z": "webhook_flow_v2",
+        "name": "Parse & Validate Webhook",
+        "func": "const tx = msg.payload.transaction_journal || msg.payload;\nif (!tx || tx.type !== 'withdrawal') {\n    node.warn('Ignoring non-withdrawal transaction');\n    return null;\n}\nif (tx.category_name && tx.budget_name) {\n    node.warn('Already categorized and budgeted');\n    return null;\n}\nmsg.tx = tx;\nreturn msg;",
+        "outputs": 1,
+        "x": 440,
+        "y": 140,
+        "wires": [
+            [
+                "get_categories",
+                "get_budgets"
+            ]
+        ]
+    },
+    {
+        "id": "get_categories",
+        "type": "http request",
+        "z": "webhook_flow_v2",
+        "name": "Get Categories",
+        "method": "GET",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "https://YOUR_FIREFLY_URL/api/v1/categories",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "bearer",
+        "senderr": false,
+        "headers": [],
+        "x": 680,
+        "y": 100,
+        "wires": [
+            [
+                "store_categories"
+            ]
+        ]
+    },
+    {
+        "id": "store_categories",
+        "type": "change",
+        "z": "webhook_flow_v2",
+        "name": "Store Categories",
+        "rules": [
+            {
+                "t": "set",
+                "p": "categories",
+                "pt": "msg",
+                "to": "payload.data",
+                "tot": "str"
+            }
+        ],
+        "x": 870,
+        "y": 100,
+        "wires": [
+            [
+                "maybe_continue"
+            ]
+        ]
+    },
+    {
+        "id": "get_budgets",
+        "type": "http request",
+        "z": "webhook_flow_v2",
+        "name": "Get Budgets",
+        "method": "GET",
+        "ret": "obj",
+        "url": "https://YOUR_FIREFLY_URL/api/v1/budgets",
+        "authType": "bearer",
+        "headers": {
+            "Authorization": "Bearer YOUR_FIREFLY_TOKEN"
+        },
+        "x": 670,
+        "y": 180,
+        "wires": [
+            [
+                "store_budgets"
+            ]
+        ]
+    },
+    {
+        "id": "store_budgets",
+        "type": "change",
+        "z": "webhook_flow_v2",
+        "name": "Store Budgets",
+        "rules": [
+            {
+                "t": "set",
+                "p": "budgets",
+                "pt": "msg",
+                "to": "payload.data"
+            }
+        ],
+        "x": 880,
+        "y": 180,
+        "wires": [
+            [
+                "maybe_continue"
+            ]
+        ]
+    },
+    {
+        "id": "maybe_continue",
+        "type": "join",
+        "z": "webhook_flow_v2",
+        "name": "Wait for Categories & Budgets",
+        "mode": "auto",
+        "build": "merged",
+        "useparts": true,
+        "x": 1130,
+        "y": 140,
+        "wires": [
+            [
+                "build_prompt"
+            ]
+        ]
+    },
+    {
+        "id": "build_prompt",
+        "type": "function",
+        "z": "webhook_flow_v2",
+        "name": "Build Chat Prompt",
+        "func": "const tx = msg.tx;\nconst categories = msg.categories.map(c => c.attributes.name).join(', ');\nconst budgets = msg.budgets.map(b => b.attributes.name).join(', ');\nmsg.payload = {\n  model: 'phi-3-mini-4k-instruct', // change this if desired\n  messages: [\n    { role: 'system', content: 'You are a financial transaction classifier.' },\n    { role: 'user', content: `Transaction: ${tx.description}\\nAmount: ${tx.amount}\\nNotes: ${tx.notes || ''}\\nAvailable Categories: ${categories}\\nAvailable Budgets: ${budgets}\\nReturn ONLY in format:\\nCategory: <name> | Budget: <name>` }\n  ],\n  temperature: 0.2,\n  max_tokens: 100\n};\nreturn msg;",
+        "outputs": 1,
+        "x": 190,
+        "y": 400,
+        "wires": [
+            [
+                "call_llm"
+            ]
+        ]
+    },
+    {
+        "id": "call_llm",
+        "type": "http request",
+        "z": "webhook_flow_v2",
+        "name": "Call OpenAI-Compatible API",
+        "method": "POST",
+        "ret": "obj",
+        "url": "https://YOUR_LLM_API/v1/chat/completions",
+        "headers": {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer YOUR_LLM_TOKEN"
+        },
+        "x": 440,
+        "y": 400,
+        "wires": [
+            [
+                "update_transaction"
+            ]
+        ]
+    },
+    {
+        "id": "update_transaction",
+        "type": "function",
+        "z": "webhook_flow_v2",
+        "name": "Prepare Firefly Update",
+        "func": "const response = msg.payload;\nconst text = response.choices?.[0]?.message?.content || '';\nconst category = text.match(/Category:\\s*([^|]+)/i)?.[1]?.trim();\nconst budget = text.match(/Budget:\\s*(.+)/i)?.[1]?.trim();\n\nmsg.method = 'PUT';\nmsg.url = `https://YOUR_FIREFLY_URL/api/v1/transactions/${msg.tx.id}`;\nmsg.headers = { 'Authorization': 'Bearer YOUR_FIREFLY_TOKEN', 'Content-Type': 'application/json' };\nmsg.payload = {\n  apply_rules: false,\n  transactions: [{\n      category_name: category,\n      budget_name: budget,\n      tags: ['ai-assisted']\n  }]\n};\nreturn msg;",
+        "outputs": 1,
+        "x": 180,
+        "y": 480,
+        "wires": [
+            [
+                "update_firefly"
+            ]
+        ]
+    },
+    {
+        "id": "update_firefly",
+        "type": "http request",
+        "z": "webhook_flow_v2",
+        "name": "Update Transaction in Firefly",
+        "method": "PUT",
+        "ret": "obj",
+        "authType": "bearer",
+        "x": 440,
+        "y": 480,
+        "wires": [
+            [
+                "webhook_reply"
+            ]
+        ]
+    },
+    {
+        "id": "webhook_reply",
+        "type": "http response",
+        "z": "webhook_flow_v2",
+        "name": "Respond to Firefly",
+        "statusCode": "200",
+        "x": 660,
+        "y": 480,
+        "wires": []
+    },
+    {
+        "id": "af2c1e524bbee77f",
+        "type": "ha-webhook",
+        "z": "webhook_flow_v2",
+        "name": "New transaction ",
+        "server": "fed3ed8b.c9707",
+        "version": 3,
+        "exposeAsEntityConfig": "",
+        "outputs": 1,
+        "webhookId": "aOGqexFNuDmCFJC7jsdpUJzJvTLuRkI6",
+        "method_get": false,
+        "method_head": false,
+        "method_post": true,
+        "method_put": true,
+        "outputProperties": [
+            {
+                "property": "topic",
+                "propertyType": "msg",
+                "value": "",
+                "valueType": "triggerId"
+            },
+            {
+                "property": "payload",
+                "propertyType": "msg",
+                "value": "",
+                "valueType": "data"
+            }
+        ],
+        "payloadLocation": false,
+        "payloadLocationType": false,
+        "headersLocation": false,
+        "headersLocationType": false,
+        "x": 180,
+        "y": 80,
+        "wires": [
+            [
+                "parse_webhook"
+            ]
+        ]
+    },
+    {
+        "id": "0b37c22677e40fcf",
+        "type": "ha-webhook",
+        "z": "webhook_flow_v2",
+        "name": "Updated Transaction",
+        "server": "fed3ed8b.c9707",
+        "version": 3,
+        "exposeAsEntityConfig": "",
+        "outputs": 1,
+        "webhookId": "aOGqexFNuDmCFJC7jsdpUJzJvTLuRkI6",
+        "method_get": false,
+        "method_head": false,
+        "method_post": true,
+        "method_put": true,
+        "outputProperties": [
+            {
+                "property": "topic",
+                "propertyType": "msg",
+                "value": "",
+                "valueType": "triggerId"
+            },
+            {
+                "property": "payload",
+                "propertyType": "msg",
+                "value": "",
+                "valueType": "data"
+            }
+        ],
+        "payloadLocation": false,
+        "payloadLocationType": false,
+        "headersLocation": false,
+        "headersLocationType": false,
+        "x": 170,
+        "y": 180,
+        "wires": [
+            [
+                "parse_webhook"
+            ]
+        ]
+    },
+    {
+        "id": "fed3ed8b.c9707",
+        "type": "server",
+        "name": "Home Assistant",
+        "addon": true,
+        "rejectUnauthorizedCerts": true,
+        "ha_boolean": "",
+        "connectionDelay": false,
+        "cacheJson": false,
+        "heartbeat": false,
+        "heartbeatInterval": "",
+        "statusSeparator": "",
+        "enableGlobalContextStore": false
+    }
+]
